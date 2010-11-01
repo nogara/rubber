@@ -5,19 +5,19 @@ module Rubber
 
       def initialize(env)
         super(env, 'dyndns')
-        @user, @pass = provider_env.user, provider_env.password
+        @user, @pass, @nameserver = provider_env.user, provider_env.password, provider_env.nameserver
         @update_url = provider_env.update_url || 'https://members.dyndns.org/nic/update?hostname=%host%&myip=%ip%'
         @update_url = @update_url.gsub(/%([^%]+)%/, '#{\1}')
       end
 
-      def nameserver
-        "ns1.mydyndns.org"
-      end
+      # def nameserver
+      #   "ns1.mydyndns.org"
+      # end
 
       def up_to_date(host, ip)
         # This queries dns server directly instead of using hosts file
         current_ip = nil
-        Resolv::DNS.open(:nameserver => [nameserver], :search => [], :ndots => 1) do |dns|
+        Resolv::DNS.open(:nameserver => [@nameserver], :search => [], :ndots => 1) do |dns|
           current_ip = dns.getaddress("#{host}.#{provider_env.domain}").to_s rescue nil
         end
         return ip == current_ip
@@ -27,11 +27,11 @@ module Rubber
         opts = setup_opts(opts, [:host, :domain])
         hostname = "#{opts[:host]}.#{opts[:domain]}"
         begin
-          Resolv::DNS.open(:nameserver => [nameserver], :search => [], :ndots => 1) do |dns|
+          Resolv::DNS.open(:nameserver => [@nameserver], :search => [], :ndots => 1) do |dns|
             r = dns.getresource(hostname, Resolv::DNS::Resource::IN::A)
             result = [{:host =>opts[:host], :data => r.address}]
           end
-        rescue
+        rescue Exception => e
           puts "Rescue #{e} #{e.message}"
           raise "Domain needs to exist in dyndns as an A record before record can be updated"
         end
