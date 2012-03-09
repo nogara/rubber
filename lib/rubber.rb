@@ -2,8 +2,6 @@ $:.unshift(File.dirname(__FILE__))
 
 module Rubber
 
-  @@version  = File.read(File.join(File.dirname(__FILE__), '..', 'VERSION')).chomp
-
   def self.initialize(project_root, project_env)
     return if defined?(RUBBER_ROOT) && defined?(RUBBER_ENV)
 
@@ -17,7 +15,7 @@ module Rubber
       # We actually do NOT want the entire rails environment because it
       # complicates bootstrap (i.e. can't run config to create db because full
       # rails env needs db to exist as some plugin accesses model or something)
-      rails_boot_file = File.join(RUBBER_ROOT, 'config', 'boot.rb')
+      rails_boot_file = File.join(Rubber.root, 'config', 'boot.rb')
       require(rails_boot_file) if File.exists? rails_boot_file
     end
 
@@ -44,7 +42,7 @@ module Rubber
   end
 
   def self.version
-    @@version
+    Rubber::VERSION
   end
 
   def self.logger
@@ -58,9 +56,18 @@ module Rubber
   def self.instances
     Rubber::Configuration.rubber_instances
   end
+  
+  def self.cloud(capistrano = nil)
+    # sharing a Net::HTTP instance across threads doesn't work, so
+    # create a new instance per thread
+    Rubber::ThreadSafeProxy.new { Rubber::Cloud::get_provider(self.config.cloud_provider || "aws", self.config, capistrano) }
+  end
+  
 end
 
 
+require 'rubber/version'
+require 'rubber/thread_safe_proxy'
 require 'rubber/configuration'
 require 'rubber/environment'
 require 'rubber/generator'
@@ -69,7 +76,7 @@ require 'rubber/util'
 require 'rubber/cloud'
 require 'rubber/dns'
 
-if Rubber::Util::is_rails3?
+if defined?(Rails::Railtie)
   module Rubber
     require 'rubber/railtie'
   end

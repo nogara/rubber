@@ -67,7 +67,7 @@ namespace :rubber do
   end
 
   def isolate_prefix
-    return "#{rubber_env.app_name}_#{RUBBER_ENV}_"
+    return "#{rubber_env.app_name}_#{Rubber.env}_"
   end
 
   def isolate_group_name(group_name)
@@ -117,7 +117,7 @@ namespace :rubber do
         # so we need to do this up frnot and remove duplicates before checking against the local rubber rules)
         cloud_group[:permissions].each do |rule|
           if rule[:source_groups]
-            rule.source_groups.each do |source_group|
+            rule[:source_groups].each do |source_group|
               rule_map = {:source_group_name => source_group[:name], :source_group_account => source_group[:account]}
               rule_map = Rubber::Util::stringify(rule_map)
               rule_maps << rule_map unless rule_maps.include?(rule_map)
@@ -134,14 +134,23 @@ namespace :rubber do
             # logger.debug "Rule in sync: #{rule_map.inspect}"
           else
             # rules don't match, remove them from cloud and re-add below
-            answer = Capistrano::CLI.ui.ask("Rule '#{rule_map.inspect}' exists in cloud, but not locally, remove from cloud? [y/N]?: ")
-            rule_map = Rubber::Util::symbolize_keys(rule_map)
-            if rule_map[:source_group_name]
-              cloud.remove_security_group_rule(group_name, nil, nil, nil, {:name => rule_map[:source_group_name], :account => rule_map[:source_group_account]})
+            answer = nil
+            msg = "Rule '#{rule_map.inspect}' exists in cloud, but not locally"
+            if rubber_env.prompt_for_security_group_sync
+              answer = Capistrano::CLI.ui.ask("#{msg}, remove from cloud? [y/N]: ")
             else
-              rule_map[:source_ips].each do |source_ip|
-                cloud.remove_security_group_rule(group_name, rule_map[:protocol], rule_map[:from_port], rule_map[:to_port], source_ip)
-              end if rule_map[:source_ips] && answer =~ /^y/
+              logger.info(msg)
+            end
+
+            if answer =~ /^y/
+              rule_map = Rubber::Util::symbolize_keys(rule_map)
+              if rule_map[:source_group_name]
+                cloud.remove_security_group_rule(group_name, nil, nil, nil, {:name => rule_map[:source_group_name], :account => rule_map[:source_group_account]})
+              else
+                rule_map[:source_ips].each do |source_ip|
+                  cloud.remove_security_group_rule(group_name, rule_map[:protocol], rule_map[:from_port], rule_map[:to_port], source_ip)
+                end if rule_map[:source_ips]
+              end
             end
           end
         end
@@ -160,7 +169,13 @@ namespace :rubber do
         end
       else
         # delete group
-        answer = Capistrano::CLI.ui.ask("Security group '#{group_name}' exists in cloud but not locally, remove from cloud? [y/N]: ")
+        answer = nil
+        msg = "Security group '#{group_name}' exists in cloud but not locally"
+        if rubber_env.prompt_for_security_group_sync
+          answer = Capistrano::CLI.ui.ask("#{msg}, remove from cloud? [y/N]: ")
+        else
+          logger.debug(msg)
+        end
         cloud.destroy_security_group(group_name) if answer =~ /^y/
       end
     end

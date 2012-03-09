@@ -32,18 +32,36 @@ module Rubber
       def read_config(file)
         Rubber.logger.debug{"Reading rubber configuration from #{file}"}
         if File.exist?(file)
-          @items = Environment.combine(@items, YAML.load_file(file) || {})
+          begin
+            @items = Environment.combine(@items, YAML.load_file(file) || {})
+          rescue Exception => e
+            Rubber.logger.error{"Unable to read rubber configuration from #{file}"}
+            raise
+          end
         end
       end
 
       def known_roles
-        roles_dir = File.join(@config_root, "role")
-        roles = Dir.entries(roles_dir)
-        roles.delete_if {|d| d =~ /(^\..*)/}
-        roles += @items['roles'].keys
-        return roles.compact.uniq
+        return @known_roles if @known_roles
+        
+        roles = []
+        # all the roles known about in config directory
+        roles.concat Dir["#{@config_root}/role/*"].collect {|f| File.basename(f) }
+        
+        # all the roles known about in script directory
+        roles.concat Dir["#{Rubber.root}/script/*/role/*"].collect {|f| File.basename(f) }
+        
+        # all the roles known about in yml files
+        Dir["#{@config_root}/rubber*.yml"].each do |yml|
+          rubber_yml = YAML.load(File.read(yml)) rescue {}
+          roles.concat(rubber_yml['roles'].keys) rescue nil
+          roles.concat(rubber_yml['role_dependencies'].keys) rescue nil
+          roles.concat(rubber_yml['role_dependencies'].values) rescue nil
+        end
+        
+        @known_roles = roles.flatten.uniq.sort
       end
-
+      
       def current_host
         Socket::gethostname.gsub(/\..*/, '')
       end
@@ -101,6 +119,12 @@ module Rubber
           each_key do |key|
             yield key, self[key]
           end
+        end
+        
+        # allows expansion when to_a gets called on hash proxy, e.g. when wrapping
+        # a var in Array() to ensure error free iteration for possible null values
+        def to_a
+          self.collect {|k, v| [k, v]}
         end
 
         def method_missing(method_id)

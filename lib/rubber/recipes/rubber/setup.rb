@@ -1,3 +1,5 @@
+require "bundler/capistrano" if Rubber::Util.is_bundler?
+
 namespace :rubber do
 
   desc <<-DESC
@@ -17,29 +19,22 @@ namespace :rubber do
 
   # Sets up instance to allow root access (e.g. recent canonical AMIs)
   def enable_root_ssh(ip, initial_ssh_user)
-    old_user = user
-    begin
-      set :user, initial_ssh_user
 
-      task :_allow_root_ssh, :hosts => ip do
-        rsudo "cp /home/#{initial_ssh_user}/.ssh/authorized_keys /root/.ssh/"
-      end
-
-      begin
-        _allow_root_ssh
-      rescue ConnectionError => e
-        if e.message =~ /Net::SSH::AuthenticationFailed/
-          logger.info "Can't connect as user #{initial_ssh_user} to #{ip}, assuming root allowed"
-        else
-          sleep 2
-          logger.info "Failed to connect to #{ip}, retrying"
-          retry
-        end
-      end
-    ensure
-      set :user, old_user
+    task :_allow_root_ssh, :hosts => "#{initial_ssh_user}@#{ip}" do
+      rsudo "cp /home/#{initial_ssh_user}/.ssh/authorized_keys /root/.ssh/"
     end
 
+    begin
+      _allow_root_ssh
+    rescue ConnectionError => e
+      if e.message =~ /Net::SSH::AuthenticationFailed/
+        logger.info "Can't connect as user #{initial_ssh_user} to #{ip}, assuming root allowed"
+      else
+        sleep 2
+        logger.info "Failed to connect to #{ip}, retrying"
+        retry
+      end
+    end
   end
 
   # Forces a direct connection
@@ -77,13 +72,24 @@ namespace :rubber do
     hosts_file = '/etc/hosts'
 
     # Generate /etc/hosts contents for the local machine from instance config
-    delim = "## rubber config #{rubber_env.domain} #{RUBBER_ENV}"
+    delim = "## rubber config #{rubber_env.domain} #{Rubber.env}"
     local_hosts = delim + "\n"
     rubber_instances.each do |ic|
       # don't add unqualified hostname in local hosts file since user may be
       # managing multiple domains with same aliases
-      hosts_data = [ic.full_name, ic.external_host, ic.internal_host].join(' ')
-      local_hosts << ic.external_ip << ' ' << hosts_data << "\n"
+      hosts_data = [ic.full_name, ic.external_host, ic.internal_host]
+      
+      # add the ip aliases for web tools hosts so we can map internal tools
+      # to their own vhost to make proxying easier (rewriting url paths for
+      # proxy is a real pain, e.g. '/graphite/' externally to '/' on the
+      # graphite web app)
+      if ic.role_names.include?('web_tools')
+        Array(rubber_env.web_tools_proxies).each do |name, settings|
+          hosts_data << "#{name}.#{ic.full_name}"
+        end
+      end
+      
+      local_hosts << ic.external_ip << ' ' << hosts_data.join(' ') << "\n"
     end
     local_hosts << delim << "\n"
 
@@ -96,6 +102,56 @@ namespace :rubber do
     end
   end
 
+
+  desc <<-DESC
+    Sets up aliases for instance hostnames based on contents of instance.yml.
+    Generates /etc/hosts for remote machines and sets hostname on remote instances
+  DESC
+  task :setup_remote_aliases do
+    hosts_file = '/etc/hosts'
+
+    # Generate /etc/hosts contents for the remote instance from instance config
+    delim = "## rubber config #{Rubber.env}"
+    remote_hosts = []
+    
+    rubber_instances.each do |ic|
+      hosts_data = [ic.internal_ip, ic.full_name, ic.name, ic.external_host, ic.internal_host]
+      
+      # add the ip aliases for web tools hosts so we can map internal tools
+      # to their own vhost to make proxying easier (rewriting url paths for
+      # proxy is a real pain, e.g. '/graphite/' externally to '/' on the
+      # graphite web app)
+      if ic.role_names.include?('web_tools')
+        Array(rubber_env.web_tools_proxies).each do |name, settings|
+          hosts_data << "#{name}.#{ic.full_name}"
+        end
+      end
+      
+      remote_hosts << hosts_data.join(' ')
+    end
+    
+    if rubber_instances.size > 0
+      
+      replace="#{delim}\\n#{remote_hosts.join("\\n")}\\n#{delim}"
+      
+      rubber.sudo_script 'setup_remote_aliases', <<-ENDSCRIPT
+        sed -i.bak '/#{delim}/,/#{delim}/c #{replace}' /etc/hosts
+        if ! grep -q "#{delim}" /etc/hosts; then
+          echo -e "#{replace}" >> /etc/hosts
+        fi
+      ENDSCRIPT
+      
+      # Setup hostname on instance so shell, etcs have nice display
+      rsudo "echo $CAPISTRANO:HOST$ > /etc/hostname && hostname $CAPISTRANO:HOST$"
+      # Newer ubuntus ec2-init script always resets hostname, so prevent it
+      rsudo "mkdir -p /etc/ec2-init && echo compat=0 > /etc/ec2-init/is-compat-env"
+    end
+
+    # TODO
+    # /etc/resolv.conf to add search domain
+    # ~/.ssh/options to setup user/host/key aliases
+  end
+  
   desc <<-DESC
     Sets up aliases in dynamic dns provider for instance hostnames based on contents of instance.yml.
   DESC
@@ -183,42 +239,6 @@ namespace :rubber do
   end
 
   desc <<-DESC
-    Sets up aliases for instance hostnames based on contents of instance.yml.
-    Generates /etc/hosts for remote machines and sets hostname on remote instances
-  DESC
-  task :setup_remote_aliases do
-    hosts_file = '/etc/hosts'
-
-    # Generate /etc/hosts contents for the remote instance from instance config
-    delim = "## rubber config"
-    delim = "#{delim} #{RUBBER_ENV}"
-    remote_hosts = delim + "\n"
-    rubber_instances.each do |ic|
-      hosts_data = [ic.name, ic.full_name, ic.external_host, ic.internal_host].join(' ')
-      remote_hosts << ic.internal_ip << ' ' << hosts_data << "\n"
-    end
-    remote_hosts << delim << "\n"
-    if rubber_instances.size > 0
-      # write out the hosts file for the remote instances
-      # NOTE that we use "capture" to get the existing hosts
-      # file, which only grabs the hosts file from the first host
-      filtered = (capture "cat #{hosts_file}").gsub(/^#{delim}.*^#{delim}\n?/m, '')
-      filtered = filtered + remote_hosts
-      # Put the generated hosts back on remote instance
-      put filtered, hosts_file
-
-      # Setup hostname on instance so shell, etcs have nice display
-      rsudo "echo $CAPISTRANO:HOST$ > /etc/hostname && hostname $CAPISTRANO:HOST$"
-      # Newer ubuntus ec2-init script always resets hostname, so prevent it
-      rsudo "mkdir -p /etc/ec2-init && echo compat=0 > /etc/ec2-init/is-compat-env"
-    end
-
-    # TODO
-    # /etc/resolv.conf to add search domain
-    # ~/.ssh/options to setup user/host/key aliases
-  end
-
-  desc <<-DESC
     Update to the newest versions of all packages/gems.
   DESC
   task :update do
@@ -265,38 +285,18 @@ namespace :rubber do
   end
 
   desc <<-DESC
-    Install ruby gems defined in Gemfile
-  DESC
-  after "deploy:update_code", "rubber:install_bundler_gems" if Rubber::Util.is_bundler?
-  task :install_bundler_gems do
-    # copied from bundler/capistrano in bundler distro
-    bundle_dir     = fetch(:bundle_dir,         " #{fetch(:shared_path)}/bundle")
-    bundle_without = [*fetch(:bundle_without,   [:development, :test])].compact
-    bundle_flags   = fetch(:bundle_flags, "--deployment --quiet")
-    bundle_gemfile = fetch(:bundle_gemfile,     "Gemfile")
-    bundle_cmd     = fetch(:bundle_cmd, "bundle")
-  
-    args = ["--gemfile #{fetch(:latest_release)}/#{bundle_gemfile}"]
-    args << "--path #{bundle_dir}" unless bundle_dir.to_s.empty?
-    args << bundle_flags.to_s
-    args << "--without #{bundle_without.join(" ")}" unless bundle_without.empty?
-
-    rsudo "#{bundle_cmd} install #{args.join(' ')}"
-  end
-
-  desc <<-DESC
     Install ruby gems defined in the rails environment.rb
   DESC
-  after "rubber:config", "rubber:install_rails_gems" if (Rubber::Util::is_rails2? && !Rubber::Util.is_bundler?)
+  after "rubber:config", "rubber:install_rails_gems" if (Rubber::Util::is_rails? && !Rubber::Util.is_bundler?)
   task :install_rails_gems do
-    rsudo "cd #{current_release} && RAILS_ENV=#{RUBBER_ENV} rake gems:install"
+    rsudo "cd #{current_release} && RAILS_ENV=#{Rubber.env} #{fetch(:rake, 'rake')} gems:install"
   end
 
   desc <<-DESC
     Convenience task for installing your defined set of ruby gems locally.
   DESC
   required_task :install_local_gems do
-    fatal("install_local_gems can only be run in development") if RUBBER_ENV != 'development'
+    fatal("install_local_gems can only be run in development") if Rubber.env != 'development'
     env = rubber_cfg.environment.bind(rubber_cfg.environment.known_roles)
     gems = env['gems']
     expanded_gem_list = []
@@ -390,6 +390,8 @@ namespace :rubber do
     sudo_script 'enable_multiverse', <<-ENDSCRIPT
       if ! grep -qc multiverse /etc/apt/sources.list /etc/apt/sources.list.d/* &> /dev/null; then
         cat /etc/apt/sources.list | sed 's/main universe/multiverse/' > /etc/apt/sources.list.d/rubber-multiverse-source.list
+      elif grep -q multiverse /etc/apt/sources.list &> /dev/null; then
+        cat /etc/apt/sources.list | sed -n '/multiverse$/s/^#\s*//p' > /etc/apt/sources.list.d/rubber-multiverse-source.list
       fi
     ENDSCRIPT
   end
@@ -399,6 +401,16 @@ namespace :rubber do
     if env.dns_provider
       provider = Rubber::Dns::get_provider(env.dns_provider, env)
       provider.update(instance_item.name, instance_item.external_ip)
+      
+      # add the ip aliases for web tools hosts so we can map internal tools
+      # to their own vhost to make proxying easier (rewriting url paths for
+      # proxy is a real pain, e.g. '/graphite/' externally to '/' on the
+      # graphite web app)
+      if instance_item.role_names.include?('web_tools')
+        Array(rubber_env.web_tools_proxies).each do |name, settings|
+          provider.update("#{name}.#{instance_item.full_name}", instance_item.external_ip)
+        end
+      end
     end
   end
 
@@ -407,6 +419,16 @@ namespace :rubber do
     if env.dns_provider
       provider = Rubber::Dns::get_provider(env.dns_provider, env)
       provider.destroy(instance_item.name)
+      
+      # add the ip aliases for web tools hosts so we can map internal tools
+      # to their own vhost to make proxying easier (rewriting url paths for
+      # proxy is a real pain, e.g. '/graphite/' externally to '/' on the
+      # graphite web app)
+      if instance_item.role_names.include?('web_tools')
+        Array(rubber_env.web_tools_proxies).each do |name, settings|
+          provider.destroy("#{name}.#{instance_item.full_name}")
+        end
+      end
     end
   end
 
@@ -429,8 +451,60 @@ namespace :rubber do
     else
       rsudo "export DEBIAN_FRONTEND=noninteractive; apt-get -q -o Dpkg::Options::=--force-confold -y --force-yes install $CAPISTRANO:VAR$", opts
     end
+    
+    maybe_reboot
   end
+  
+  def multi_capture(cmd, opts={})
+    mutex = Mutex.new
+    host_data = {}
+    run(cmd, opts) do |channel, stream, data|
+      if data
+        host = channel.properties[:host]
+        mutex.synchronize do
+          host_data[host] ||= ""
+          host_data[host] << data
+        end
+      end
+    end
+    return host_data    
+  end
+  
+  def maybe_reboot
+    reboot_needed = multi_capture("echo $(ls /var/run/reboot-required 2> /dev/null)")
+    reboot_hosts = reboot_needed.collect {|k, v| v.strip.size > 0 ? k : nil}.compact
+    
+    if reboot_hosts.size > 0
 
+      ENV['REBOOT'] = 'y' if ENV['FORCE'] =~ /^(t|y)/
+      reboot = get_env('REBOOT', "Updates require a reboot on hosts #{reboot_hosts.inspect}, reboot [y/N]?", false)
+      reboot = (reboot =~ /^y/)
+      
+      if reboot
+
+        logger.info "Rebooting ..."
+        run("#{sudo} reboot", :hosts => reboot_hosts)
+        sleep 30
+
+        # since we rebooted, teardown the connections to force cap to reconnect
+        teardown_connections_to(sessions.keys)
+
+        reboot_hosts.each do |host|
+          direct_connection(host) do
+            run "echo"
+          end
+          logger.info "#{host} completed reboot"
+        end
+        
+      end
+      
+      # could take a while to reboot (or get answer from prompt), so
+      # we need to rebuild all capistrano connections in case they timed out
+      teardown_connections_to(sessions.keys)
+      
+    end
+  end
+        
   def custom_package(url_base, name, ver, install_test)
     rubber.sudo_script "install_#{name}", <<-ENDSCRIPT
       if [[ #{install_test} ]]; then

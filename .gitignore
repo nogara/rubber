@@ -1,7 +1,12 @@
+*.gem
+.bundle
+Gemfile.lock
+pkg
 .buildpath
 .project
 .idea
 *.swp
-pkg
-*.gem
-
+.DS_Store
+.gitignore
+atlassian-ide-plugin.xml
+log

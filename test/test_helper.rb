@@ -3,12 +3,17 @@ $:.unshift "#{File.dirname(__FILE__)}/../lib"
 require 'rubber'
 Rubber::initialize(File.dirname(__FILE__), 'test')
 
-require 'rubygems'
+require 'test/unit'
 require 'mocha'
+require 'shoulda-context'
 require 'pp'
-require 'fakeweb'
-FakeWeb.allow_net_connect = false
+require 'tempfile'
 
-def fakeweb_fixture(name)
-  return File.read("#{File.dirname(__FILE__)}/fixtures/fakeweb/#{name}")
+require 'fog'
+Fog.mock!
+
+class Test::Unit::TestCase
+  def teardown
+    Fog::Mock.reset    
+  end
 end

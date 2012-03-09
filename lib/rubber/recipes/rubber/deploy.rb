@@ -38,12 +38,9 @@ namespace :rubber do
   DESC
   task :config do
     opts = {}
-    opts['NO_POST'] = true if ENV['NO_POST']
-    opts['FILE'] = ENV['FILE'] if ENV['FILE']
-    opts['RUBBER_ENV'] = RUBBER_ENV
-    # we need to set rails env as well because when running rake
-    # in a rails project, rails gets loaded before the rubber hook gets run
-    opts['RAILS_ENV'] = RUBBER_ENV
+    opts[:no_post] = true if ENV['NO_POST']
+    opts[:force] = true if ENV['FORCE']
+    opts[:file] = ENV['FILE'] if ENV['FILE']
 
     # when running deploy:migrations, we need to run config against release_path
     opts[:deploy_path] = current_release if fetch(:migrate_target, :current).to_sym == :latest
@@ -65,26 +62,36 @@ namespace :rubber do
 
   def run_config(options={})
     path = options.delete(:deploy_path) || current_path
-    extra_env = options.keys.inject("") {|all, k|  "#{all} #{k}=\"#{options[k]}\""}
+    opts = ""
+    opts += " --no_post" if options[:no_post]
+    opts += " --force" if options[:force]
+    opts += " --file=\"#{options[:file]}\"" if options[:file]
 
     # Need to do this so we can work with staging instances without having to
     # checkin instance file between create and bootstrap, as well as during a deploy
     if fetch(:push_instance_config, false)
-      push_files = [rubber_instances.file] + rubber_cfg.environment.config_files
+      push_files = rubber_cfg.environment.config_files
+
+      # If we're using a local instance file, push that up.  This isn't necessary when storing in S3 or SimpleDB.
+      if rubber_instances.instance_storage =~ /^file:(.*)/
+        location = $1
+        push_files << location
+      end
+
       push_files.each do |file|
-        dest_file = file.sub(/^#{RUBBER_ROOT}\/?/, '')
+        dest_file = file.sub(/^#{Rubber.root}\/?/, '')
         put(File.read(file), File.join(path, dest_file), :mode => "+r")
       end
     end
 
-    # if the user has defined a secret config file, then push it into RUBBER_ROOT/config/rubber
+    # if the user has defined a secret config file, then push it into Rubber.root/config/rubber
     secret = rubber_cfg.environment.config_secret
     if secret && File.exist?(secret)
-      base = rubber_cfg.environment.config_root.sub(/^#{RUBBER_ROOT}\/?/, '')
+      base = rubber_cfg.environment.config_root.sub(/^#{Rubber.root}\/?/, '')
       put(File.read(secret), File.join(path, base, File.basename(secret)), :mode => "+r")
     end
-
-    rsudo "cd #{path} && #{extra_env} rake rubber:config"
+    
+    rsudo "cd #{path} && RUBBER_ENV=#{Rubber.env} RAILS_ENV=#{Rubber.env} ./script/rubber config #{opts}"
   end
 
 end
